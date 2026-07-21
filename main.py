@@ -1,34 +1,60 @@
+import json
+import re
 from io import BytesIO
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 
 # =========================================================
-# 기본 설정
+# 페이지 설정
 # =========================================================
 st.set_page_config(
-    page_title="청소년 생성형 AI 분석",
-    page_icon="📊",
+    page_title="전국 청소년 AI 리터러시 단계구분도",
+    page_icon="🧠",
     layout="wide",
 )
 
-CODEBOOK_NAME = "(코드북) 청소년의 생성형 AI 이용실태 및 리터러시 증진방안 연구.csv"
-CODEBOOK_PATH = Path(__file__).parent / CODEBOOK_NAME
+
+# =========================================================
+# 파일 및 URL 설정
+# =========================================================
+CODEBOOK_NAME = (
+    "(코드북) 청소년의 생성형 AI 이용실태 및 "
+    "리터러시 증진방안 연구.csv"
+)
+
+RAW_DATA_NAME = (
+    "청소년의 생성형 AI 이용실태 및 "
+    "리터러시 증진방안 연구.csv"
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+
+CODEBOOK_PATH = BASE_DIR / CODEBOOK_NAME
+RAW_DATA_PATH = BASE_DIR / RAW_DATA_NAME
 
 
-# 필터에 사용할 변수
-FILTERS = {
-    "학교급": "SQ0_3",
-    "학년": "DQ1",
-    "성별": "SQ3",
-    "지역": "DM6",
-}
+SIGUNGU_URL = (
+    "https://raw.githubusercontent.com/"
+    "greatsong/modudata/main/data/boundaries/"
+    "sigungu_kr.geojson"
+)
+
+SIDO_URL = (
+    "https://raw.githubusercontent.com/"
+    "greatsong/modudata/main/data/boundaries/"
+    "sido_kr.geojson"
+)
 
 
-# AI 리터러시 영역
-LITERACY = {
+# =========================================================
+# 코드북 Q14 AI 리터러시 문항
+# =========================================================
+LITERACY_GROUPS = {
     "정보 점검": [
         "Q14_1_1",
         "Q14_1_2",
@@ -51,66 +77,50 @@ LITERACY = {
     ],
 }
 
-
-# 생성형 AI 서비스
-SERVICES = {
-    "챗GPT": "Q6_1",
-    "소라": "Q6_2",
-    "빙": "Q6_3",
-    "제미나이": "Q6_4",
-    "미드저니": "Q6_5",
-    "달리": "Q6_6",
-    "스냅챗 마이 AI": "Q6_7",
-    "클로버엑스": "Q6_8",
-    "뤼튼": "Q6_9",
-}
+ALL_Q14_COLUMNS = [
+    column
+    for columns in LITERACY_GROUPS.values()
+    for column in columns
+]
 
 
-# 교육 경험과 교육 필요성
-EDUCATION = {
-    "작동원리": (
-        "Q18_1",
-        "Q19_1",
-    ),
-    "활용 방법": (
-        "Q18_2",
-        "Q19_2",
-    ),
-    "개인정보·저작권": (
-        "Q18_3",
-        "Q19_3",
-    ),
-    "오류·편향 확인": (
-        "Q18_4",
-        "Q19_4",
-    ),
-}
-
-
-# Q7 사용시간 범주의 대표 시간
-# 2시간 이상은 135분으로 가정
-TIME_MINUTES = {
-    1: 15,
-    2: 45,
-    3: 75,
-    4: 105,
-    5: 135,
+# =========================================================
+# 코드북 DM6 → 행정구역 시도 코드
+# =========================================================
+DM6_TO_SIDO_CODE = {
+    1: "11",    # 서울
+    2: "26",    # 부산
+    3: "27",    # 대구
+    4: "28",    # 인천
+    5: "29",    # 광주
+    6: "30",    # 대전
+    7: "31",    # 울산
+    8: "36",    # 세종
+    9: "41",    # 경기
+    10: "51",   # 강원
+    11: "43",   # 충북
+    12: "44",   # 충남
+    13: "52",   # 전북
+    14: "46",   # 전남
+    15: "47",   # 경북
+    16: "48",   # 경남
+    17: "50",   # 제주
 }
 
 
 # =========================================================
 # CSV 읽기
 # =========================================================
-def read_csv(source):
+def read_csv_flexible(source):
     """
-    CP949, UTF-8-SIG, UTF-8 순서로 CSV 파일을 읽습니다.
+    UTF-8-SIG, CP949, UTF-8 순서로 CSV를 읽습니다.
     """
 
-    encodings = [
-        "cp949",
+    encodings = (
         "utf-8-sig",
+        "cp949",
         "utf-8",
-    ]
+    )
 
     if isinstance(source, (str, Path)):
         for encoding in encodings:
@@ -141,16 +151,18 @@ def read_csv(source):
             except UnicodeDecodeError:
                 continue
 
-    raise ValueError("CSV 파일의 인코딩을 확인할 수 없습니다.")
+    raise ValueError(
+        "CSV 파일의 인코딩을 확인할 수 없습니다."
+    )
 
 
 @st.cache_data
-def load_codebook(path):
+def load_codebook(path_string):
     """
-    코드북을 불러오고 빈 변수명을 앞의 값으로 채웁니다.
+    코드북을 읽고 변수명의 빈칸을 앞의 값으로 채웁니다.
     """
 
-    codebook = read_csv(path)
+    codebook = read_csv_flexible(path_string)
 
     codebook.columns = (
         codebook.columns
@@ -165,9 +177,12 @@ def load_codebook(path):
         "레이블",
     }
 
-    if not required_columns.issubset(codebook.columns):
+    if not required_columns.issubset(
+        codebook.columns
+    ):
         raise ValueError(
-            "코드북에 변수, 변수설명, 변수값, 레이블 열이 필요합니다."
+            "코드북에 변수, 변수설명, "
+            "변수값, 레이블 열이 필요합니다."
         )
 
     codebook[
@@ -186,12 +201,12 @@ def load_codebook(path):
 
 
 @st.cache_data
-def load_raw_data(raw_bytes):
+def load_uploaded_data(raw_bytes):
     """
-    업로드된 학생별 원자료를 불러옵니다.
+    업로드한 설문 원자료를 읽습니다.
     """
 
-    data = read_csv(
+    data = read_csv_flexible(
         BytesIO(raw_bytes)
     )
 
@@ -204,35 +219,148 @@ def load_raw_data(raw_bytes):
     return data
 
 
-# =========================================================
-# 계산 함수
-# =========================================================
-def number(data, column):
+@st.cache_data(ttl=86400)
+def load_geojson(url):
     """
-    특정 열을 숫자형으로 변환합니다.
+    GitHub에서 GeoJSON 경계 파일을 읽습니다.
     """
 
-    if column not in data.columns:
-        return pd.Series(
-            index=data.index,
-            dtype="float64",
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+        },
+    )
+
+    with urlopen(
+        request,
+        timeout=60,
+    ) as response:
+
+        text = response.read().decode(
+            "utf-8"
         )
 
-    return pd.to_numeric(
-        data[column],
-        errors="coerce",
+    return json.loads(text)
+
+
+# =========================================================
+# 지역 코드 처리
+# =========================================================
+def normalize_sigungu_code(value):
+    """
+    시군구 코드를 문자열 5자리로 정리합니다.
+
+    10자리 행정동 코드가 들어오면 앞 5자리를 사용합니다.
+    """
+
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+
+    text = re.sub(
+        r"\.0$",
+        "",
+        text,
+    )
+
+    digits = re.sub(
+        r"[^0-9]",
+        "",
+        text,
+    )
+
+    if len(digits) >= 10:
+        return digits[:5]
+
+    if len(digits) == 5:
+        return digits
+
+    return None
+
+
+def find_sigungu_code_column(data):
+    """
+    원자료에서 시군구 코드로 사용할 열을 찾습니다.
+    """
+
+    candidates = [
+        "코드",
+        "시군구코드",
+        "지역코드",
+        "행정구역코드",
+        "code",
+        "CODE",
+    ]
+
+    for column in candidates:
+
+        if column not in data.columns:
+            continue
+
+        codes = data[column].map(
+            normalize_sigungu_code
+        )
+
+        if codes.notna().any():
+            return column, codes
+
+    empty_codes = pd.Series(
+        index=data.index,
+        dtype="object",
+    )
+
+    return None, empty_codes
+
+
+# =========================================================
+# AI 리터러시 계산
+# =========================================================
+def calculate_literacy_scores(
+    data,
+    columns,
+    minimum_answer_count,
+):
+    """
+    Q14 문항의 개인별 평균을 계산합니다.
+    """
+
+    answers = (
+        data[columns]
+        .apply(
+            pd.to_numeric,
+            errors="coerce",
+        )
+    )
+
+    answer_count = (
+        answers
+        .notna()
+        .sum(axis=1)
+    )
+
+    scores = answers.mean(
+        axis=1,
+        skipna=True,
+    )
+
+    return scores.where(
+        answer_count
+        >= minimum_answer_count
     )
 
 
-def weights_for(data):
+def get_weights(data):
     """
-    표준화 가중치 wgt_b가 있으면 사용합니다.
+    wgt_b가 있으면 표준화 가중치를 사용합니다.
     """
 
     if "wgt_b" in data.columns:
-        weights = number(
-            data,
-            "wgt_b",
+
+        weights = pd.to_numeric(
+            data["wgt_b"],
+            errors="coerce",
         )
 
         weights = weights.where(
@@ -245,290 +373,419 @@ def weights_for(data):
                 "표준화 가중치(wgt_b) 적용",
             )
 
+    default_weights = pd.Series(
+        1.0,
+        index=data.index,
+    )
+
     return (
-        pd.Series(
-            1.0,
-            index=data.index,
-        ),
+        default_weights,
         "가중치 없음",
     )
 
 
-def weighted_mean(values, weights):
-    """
-    가중평균을 계산합니다.
-    """
-
-    values = pd.to_numeric(
-        values,
-        errors="coerce",
-    )
-
-    weights = pd.to_numeric(
-        weights,
-        errors="coerce",
-    )
-
-    valid = (
-        values.notna()
-        & weights.notna()
-        & (weights > 0)
-    )
-
-    if not valid.any():
-        return float("nan")
-
-    weighted_sum = (
-        values[valid]
-        * weights[valid]
-    ).sum()
-
-    weight_sum = weights[valid].sum()
-
-    if weight_sum == 0:
-        return float("nan")
-
-    return float(
-        weighted_sum
-        / weight_sum
-    )
-
-
-def weighted_rate(
-    condition,
-    values,
+def aggregate_by_region(
+    region_codes,
+    literacy_scores,
     weights,
+    threshold,
 ):
     """
-    가중 비율을 백분율로 계산합니다.
+    지역별 고리터러시 응답자 비율과
+    평균 리터러시 점수를 계산합니다.
     """
 
-    values = pd.to_numeric(
-        values,
-        errors="coerce",
+    working = pd.DataFrame(
+        {
+            "코드": region_codes,
+            "리터러시점수": literacy_scores,
+            "가중치": weights,
+        }
     )
 
-    weights = pd.to_numeric(
-        weights,
-        errors="coerce",
+    working = working.dropna(
+        subset=[
+            "코드",
+            "리터러시점수",
+            "가중치",
+        ]
     )
 
-    valid = (
-        values.notna()
-        & weights.notna()
-        & (weights > 0)
+    working = working[
+        working["가중치"] > 0
+    ].copy()
+
+    if working.empty:
+        return pd.DataFrame()
+
+    working[
+        "고리터러시가중치"
+    ] = (
+        working[
+            "리터러시점수"
+        ].ge(
+            threshold
+        ).astype(float)
+        * working["가중치"]
     )
 
-    if not valid.any():
-        return float("nan")
+    working[
+        "점수가중합"
+    ] = (
+        working["리터러시점수"]
+        * working["가중치"]
+    )
 
-    weighted_count = (
-        condition[valid].astype(float)
-        * weights[valid]
-    ).sum()
+    result = (
+        working
+        .groupby(
+            "코드",
+            as_index=False,
+        )
+        .agg(
+            응답자수=(
+                "리터러시점수",
+                "size",
+            ),
+            전체가중치=(
+                "가중치",
+                "sum",
+            ),
+            고리터러시가중치=(
+                "고리터러시가중치",
+                "sum",
+            ),
+            점수가중합=(
+                "점수가중합",
+                "sum",
+            ),
+        )
+    )
 
-    weight_sum = weights[valid].sum()
-
-    if weight_sum == 0:
-        return float("nan")
-
-    return float(
-        weighted_count
-        / weight_sum
+    result[
+        "AI 리터러시 비율(%)"
+    ] = (
+        result["고리터러시가중치"]
+        / result["전체가중치"]
         * 100
     )
 
+    result[
+        "평균 리터러시 점수"
+    ] = (
+        result["점수가중합"]
+        / result["전체가중치"]
+    )
 
-def row_average(
-    data,
-    columns,
-):
-    """
-    여러 문항의 응답자별 평균을 계산합니다.
-    """
-
-    existing_columns = [
-        column
-        for column in columns
-        if column in data.columns
+    return result[
+        [
+            "코드",
+            "응답자수",
+            "평균 리터러시 점수",
+            "AI 리터러시 비율(%)",
+        ]
     ]
 
-    if not existing_columns:
-        return pd.Series(
-            index=data.index,
-            dtype="float64",
-        )
 
-    numeric_data = (
-        data[existing_columns]
-        .apply(
-            pd.to_numeric,
-            errors="coerce",
-        )
-    )
-
-    return numeric_data.mean(
-        axis=1,
-        skipna=True,
-    )
-
-
-def code_labels(
-    codebook,
-    variable,
+# =========================================================
+# GeoJSON 속성 처리
+# =========================================================
+def get_boundary_table(
+    geojson,
+    region_level,
 ):
     """
-    코드북에서 숫자 코드와 레이블을 연결합니다.
+    GeoJSON에서 코드와 지역 이름을 가져옵니다.
     """
 
-    table = codebook[
-        codebook["변수"]
-        .astype(str)
-        .eq(variable)
-    ].copy()
-
-    table["변수값"] = pd.to_numeric(
-        table["변수값"],
-        errors="coerce",
-    )
-
-    table = table.dropna(
-        subset=[
-            "변수값",
-            "레이블",
+    if region_level == "시군구":
+        name_candidates = [
+            "시군구",
+            "sggnm",
+            "SIG_KOR_NM",
+            "name",
         ]
+
+    else:
+        name_candidates = [
+            "시도",
+            "sidonm",
+            "CTP_KOR_NM",
+            "name",
+        ]
+
+    features = geojson.get(
+        "features",
+        [],
     )
 
-    return dict(
-        zip(
-            table["변수값"].astype(float),
-            table["레이블"].astype(str),
+    if not features:
+        return pd.DataFrame(
+            columns=[
+                "코드",
+                "지역명",
+            ]
+        )
+
+    first_properties = (
+        features[0]
+        .get(
+            "properties",
+            {},
         )
     )
 
+    name_property = next(
+        (
+            key
+            for key in name_candidates
+            if key in first_properties
+        ),
+        None,
+    )
 
-def show_value(
-    value,
-    digits=1,
-    suffix="",
-):
-    """
-    계산 결과를 화면 표시용 문자열로 변환합니다.
-    """
+    rows = []
 
-    if pd.isna(value):
-        return "계산 불가"
+    for feature in features:
+
+        properties = feature.get(
+            "properties",
+            {},
+        )
+
+        code = str(
+            properties.get(
+                "코드",
+                "",
+            )
+        ).strip()
+
+        name = str(
+            properties.get(
+                name_property,
+                code,
+            )
+        ).strip()
+
+        rows.append(
+            {
+                "코드": code,
+                "지역명": name,
+            }
+        )
 
     return (
-        f"{value:,.{digits}f}"
-        f"{suffix}"
+        pd.DataFrame(rows)
+        .drop_duplicates(
+            subset=["코드"]
+        )
     )
 
 
 # =========================================================
-# 사이드바 필터
+# Plotly 단계구분도
 # =========================================================
-def apply_filters(
-    data,
-    codebook,
+def create_choropleth(
+    map_data,
+    geojson,
+    region_level,
+    threshold,
 ):
-    result = data.copy()
+    """
+    배경 타일 없이 행정구역 경계와 색상만 표시합니다.
+    """
 
-    st.sidebar.header(
-        "분석 대상 필터"
-    )
+    colored_data = map_data.dropna(
+        subset=[
+            "AI 리터러시 비율(%)",
+        ]
+    ).copy()
 
-    st.sidebar.caption(
-        "선택한 조건은 모든 결과에 적용됩니다."
-    )
+    values = colored_data[
+        "AI 리터러시 비율(%)"
+    ]
 
-    for title, variable in FILTERS.items():
+    if values.empty:
+        color_min = 0.0
+        color_max = 100.0
 
-        if variable not in result.columns:
-            continue
-
-        label_map = code_labels(
-            codebook,
-            variable,
+    else:
+        color_min = max(
+            0.0,
+            float(values.min()) - 5,
         )
 
-        codes = sorted(
-            number(
-                result,
-                variable,
+        color_max = min(
+            100.0,
+            float(values.max()) + 5,
+        )
+
+        if color_max <= color_min:
+            color_min = max(
+                0.0,
+                color_min - 1,
             )
-            .dropna()
-            .unique()
+
+            color_max = min(
+                100.0,
+                color_max + 1,
+            )
+
+    figure = go.Figure()
+
+    # 전국 경계
+    figure.add_trace(
+        go.Choropleth(
+            geojson=geojson,
+            locations=map_data["코드"],
+            z=[0] * len(map_data),
+            featureidkey="properties.코드",
+            colorscale=[
+                [
+                    0,
+                    "#eef1f5",
+                ],
+                [
+                    1,
+                    "#eef1f5",
+                ],
+            ],
+            showscale=False,
+            marker_line_color="white",
+            marker_line_width=0.7,
+            hoverinfo="skip",
         )
+    )
 
-        display_to_code = {
-            label_map.get(
-                float(code),
-                f"코드 {code:g}",
-            ): float(code)
-            for code in codes
-        }
-
-        selected = st.sidebar.multiselect(
-            f"{title} 선택",
-            options=list(
-                display_to_code.keys()
+    # AI 리터러시 비율
+    figure.add_trace(
+        go.Choropleth(
+            geojson=geojson,
+            locations=colored_data["코드"],
+            z=colored_data[
+                "AI 리터러시 비율(%)"
+            ],
+            featureidkey="properties.코드",
+            colorscale="Blues",
+            zmin=color_min,
+            zmax=color_max,
+            marker_line_color="white",
+            marker_line_width=0.7,
+            colorbar={
+                "title": {
+                    "text": (
+                        "고리터러시"
+                        "<br>비율(%)"
+                    ),
+                },
+                "ticksuffix": "%",
+                "thickness": 16,
+                "len": 0.72,
+            },
+            customdata=colored_data[
+                [
+                    "지역명",
+                    "응답자수",
+                    "평균 리터러시 점수",
+                ]
+            ],
+            hovertemplate=(
+                f"<b>{region_level}: "
+                "%{customdata[0]}</b><br>"
+                "AI 리터러시 비율: "
+                "%{z:.1f}%<br>"
+                "평균 점수: "
+                "%{customdata[2]:.2f} / 5<br>"
+                "유효 응답자: "
+                "%{customdata[1]:,.0f}명"
+                "<extra></extra>"
             ),
-            default=list(
-                display_to_code.keys()
-            ),
-            key=f"filter_{variable}",
         )
+    )
 
-        if not selected:
-            return result.iloc[0:0]
+    figure.update_geos(
+        fitbounds="locations",
+        visible=False,
+        bgcolor="rgba(0,0,0,0)",
+        projection_type="mercator",
+    )
 
-        selected_codes = [
-            display_to_code[item]
-            for item in selected
-        ]
+    figure.update_layout(
+        title={
+            "text": (
+                "전국 청소년 AI 리터러시 "
+                "단계구분도"
+                "<br>"
+                f"<sup>{region_level}별 · "
+                f"평균 {threshold:.1f}점 이상 "
+                "응답자 비율</sup>"
+            ),
+            "x": 0.01,
+            "xanchor": "left",
+        },
+        height=760,
+        margin={
+            "l": 0,
+            "r": 0,
+            "t": 80,
+            "b": 0,
+        },
+        paper_bgcolor=(
+            "rgba(0,0,0,0)"
+        ),
+        plot_bgcolor=(
+            "rgba(0,0,0,0)"
+        ),
+    )
 
-        result = result[
-            number(
-                result,
-                variable,
-            ).isin(selected_codes)
-        ]
-
-    return result
+    return figure
 
 
 # =========================================================
 # 화면 제목
 # =========================================================
 st.title(
-    "📊 1. 전체 현황"
+    "🧠 전국 청소년 AI 리터러시 단계구분도"
 )
 
-st.write(
-    "생성형 AI 이용률, 리터러시, 사용시간, "
-    "서비스 이용과 교육 격차를 한 화면에서 확인합니다."
+st.caption(
+    "Q14의 정보 점검·AI 소통·창의적 활용·"
+    "윤리적 활용 12문항을 이용합니다."
 )
+
+
+with st.expander(
+    "AI 리터러시 비율 계산 기준"
+):
+
+    st.markdown(
+        """
+- 응답자별 AI 리터러시 점수: 선택한 Q14 문항의 평균
+- 문항 점수 범위: 1점부터 5점
+- 고리터러시 응답자: 평균 점수가 설정한 기준 이상인 응답자
+- 지역별 AI 리터러시 비율: 고리터러시 응답자의 가중합 ÷ 유효 응답자의 가중합 × 100
+- `wgt_b`가 있으면 표준화 가중치를 사용하고, 없으면 단순 비율을 사용
+- 인구자료의 `계_` 열과 고령화율은 사용하지 않습니다.
+- 이번 비율의 분모는 Q14 문항에 유효하게 답한 설문 응답자입니다.
+        """
+    )
 
 
 # =========================================================
-# 코드북 확인
+# 코드북 읽기
 # =========================================================
 if not CODEBOOK_PATH.exists():
 
     st.error(
-        f"코드북 파일이 없습니다: {CODEBOOK_NAME}"
-    )
-
-    st.write(
-        "main.py와 코드북 CSV 파일을 같은 폴더에 넣어주세요."
+        "코드북 파일을 찾을 수 없습니다."
     )
 
     st.code(
-        """프로젝트폴더/
+        f"""프로젝트폴더/
 ├── main.py
 ├── requirements.txt
-└── (코드북) 청소년의 생성형 AI 이용실태 및 리터러시 증진방안 연구.csv""",
+├── {CODEBOOK_NAME}
+└── {RAW_DATA_NAME}""",
         language="text",
     )
 
@@ -550,24 +807,22 @@ except Exception as error:
 
 
 # =========================================================
-# 학생별 설문 원자료 업로드
+# 원자료 업로드 또는 로컬 파일 읽기
 # =========================================================
 st.sidebar.header(
-    "설문 원자료"
+    "데이터 설정"
 )
 
 uploaded_file = st.sidebar.file_uploader(
-    "학생별 원자료 CSV 업로드",
+    "학생별 설문 원자료 CSV",
     type=["csv"],
     help=(
-        "한 행이 학생 한 명이고 "
-        "Q4, Q14_1_1, DM6 같은 열이 있는 파일입니다."
+        "Q14 문항과 지역 코드가 포함된 "
+        "응답자별 원자료를 올리세요."
     ),
 )
 
 
-# 업로드된 파일을 세션에 저장
-# 나중에 다른 페이지에서도 같은 데이터를 사용할 수 있습니다.
 if uploaded_file is not None:
 
     st.session_state[
@@ -579,58 +834,52 @@ if uploaded_file is not None:
     ] = uploaded_file.name
 
 
-# 원자료가 아직 없는 경우
-if "survey_raw_bytes" not in st.session_state:
-
-    st.info(
-        "코드북은 정상적으로 연결됐습니다. "
-        "왼쪽에서 학생별 설문 원자료 CSV를 업로드하면 "
-        "실제 결과가 계산됩니다."
-    )
-
-    st.warning(
-        "코드북만으로는 이용률과 평균 점수를 계산할 수 없습니다."
-    )
-
-    preview = pd.DataFrame(
-        {
-            "표시할 지표": [
-                "응답자 수",
-                "생성형 AI 이용률",
-                "종합 AI 리터러시",
-                "추정 평균 사용시간",
-                "가장 많이 쓰는 서비스",
-                "가장 큰 교육 격차",
-            ],
-            "계산 기준": [
-                "원자료 행 수",
-                "Q4=2의 비율",
-                "Q14 12개 문항 평균",
-                "Q7 범주를 분으로 환산",
-                "Q6에서 3점 이상 비율",
-                "Q19 필요성 - Q18 경험",
-            ],
-        }
-    )
-
-    st.dataframe(
-        preview,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.stop()
-
-
-# =========================================================
-# 원자료 불러오기
-# =========================================================
 try:
-    raw = load_raw_data(
-        st.session_state[
-            "survey_raw_bytes"
-        ]
-    )
+
+    if (
+        "survey_raw_bytes"
+        in st.session_state
+    ):
+
+        survey = load_uploaded_data(
+            st.session_state[
+                "survey_raw_bytes"
+            ]
+        )
+
+        survey_file_name = (
+            st.session_state.get(
+                "survey_file_name",
+                "업로드 원자료",
+            )
+        )
+
+    elif RAW_DATA_PATH.exists():
+
+        survey = read_csv_flexible(
+            RAW_DATA_PATH
+        )
+
+        survey.columns = (
+            survey.columns
+            .astype(str)
+            .str.strip()
+        )
+
+        survey_file_name = (
+            RAW_DATA_NAME
+        )
+
+    else:
+
+        st.info(
+            "왼쪽에서 설문 원자료 CSV를 "
+            "업로드하거나 GitHub 저장소에 "
+            f"`{RAW_DATA_NAME}` 파일을 "
+            "넣어주세요."
+        )
+
+        st.stop()
 
 except Exception as error:
 
@@ -641,567 +890,493 @@ except Exception as error:
     st.stop()
 
 
-# 필터 적용
-filtered = apply_filters(
-    raw,
-    codebook,
-)
+# =========================================================
+# Q14 변수 확인
+# =========================================================
+missing_q14_columns = [
+    column
+    for column in ALL_Q14_COLUMNS
+    if column not in survey.columns
+]
 
-if filtered.empty:
 
-    st.warning(
-        "선택한 필터에 해당하는 응답자가 없습니다."
+if missing_q14_columns:
+
+    st.error(
+        "원자료에서 다음 AI 리터러시 문항을 "
+        "찾지 못했습니다: "
+        + ", ".join(
+            missing_q14_columns
+        )
     )
 
     st.stop()
 
 
-# 가중치 설정
-weights, weight_note = weights_for(
-    filtered
-)
-
-st.caption(
-    f"원자료: "
-    f"{st.session_state.get('survey_file_name', '업로드 파일')}"
-    f" · 코드북: {CODEBOOK_NAME}"
-    f" · {weight_note}"
-)
-
-
 # =========================================================
-# 핵심 지표 계산
+# 사이드바 설정
 # =========================================================
-
-# 생성형 AI 이용률
-# Q4: 1=없음, 2=있음
-q4 = number(
-    filtered,
-    "Q4",
-)
-
-ai_use_rate = weighted_rate(
-    q4.eq(2),
-    q4,
-    weights,
+selected_groups = st.sidebar.multiselect(
+    "AI 리터러시 영역",
+    options=list(
+        LITERACY_GROUPS.keys()
+    ),
+    default=list(
+        LITERACY_GROUPS.keys()
+    ),
 )
 
 
-# 종합 AI 리터러시
-all_literacy_columns = [
-    item
-    for columns in LITERACY.values()
-    for item in columns
+if not selected_groups:
+
+    st.warning(
+        "AI 리터러시 영역을 "
+        "하나 이상 선택해주세요."
+    )
+
+    st.stop()
+
+
+selected_columns = [
+    column
+    for group in selected_groups
+    for column in LITERACY_GROUPS[group]
 ]
 
-overall_literacy = weighted_mean(
-    row_average(
-        filtered,
-        all_literacy_columns,
+
+threshold = st.sidebar.slider(
+    "고리터러시 기준 점수",
+    min_value=1.0,
+    max_value=5.0,
+    value=4.0,
+    step=0.1,
+)
+
+
+default_minimum_answers = max(
+    1,
+    int(
+        len(selected_columns)
+        * 0.75
     ),
-    weights,
 )
 
 
-# 평균 사용시간
-q7 = number(
-    filtered,
-    "Q7",
+minimum_answer_count = (
+    st.sidebar.slider(
+        "최소 응답 문항 수",
+        min_value=1,
+        max_value=len(
+            selected_columns
+        ),
+        value=default_minimum_answers,
+        help=(
+            "이 개수 이상의 문항에 "
+            "답한 응답자만 평균을 계산합니다."
+        ),
+    )
 )
 
-use_minutes = q7.map(
-    TIME_MINUTES
-)
 
-average_minutes = weighted_mean(
-    use_minutes,
-    weights,
+minimum_region_sample = (
+    st.sidebar.number_input(
+        "지도에 표시할 최소 지역 표본 수",
+        min_value=1,
+        max_value=1000,
+        value=10,
+        step=1,
+        help=(
+            "응답자가 너무 적은 지역은 "
+            "색칠하지 않습니다."
+        ),
+    )
 )
 
 
 # =========================================================
-# 서비스별 이용률
+# 지역 코드 및 행정단위 결정
 # =========================================================
-service_rows = []
-
-for service, variable in SERVICES.items():
-
-    if variable not in filtered.columns:
-        continue
-
-    values = number(
-        filtered,
-        variable,
+code_column, sigungu_codes = (
+    find_sigungu_code_column(
+        survey
     )
+)
 
-    service_rows.append(
-        {
-            "서비스": service,
-            "이용자 비율(%)": weighted_rate(
-                values.ge(3),
-                values,
-                weights,
-            ),
-            "평균 빈도(5점)": weighted_mean(
-                values,
-                weights,
-            ),
-        }
+
+if code_column is not None:
+
+    region_level = "시군구"
+
+    region_codes = sigungu_codes
+
+    geojson_url = SIGUNGU_URL
+
+    code_note = (
+        f"`{code_column}` 열을 "
+        "5자리 문자열 코드로 변환"
     )
 
 
-if service_rows:
+elif "DM6" in survey.columns:
 
-    service_df = pd.DataFrame(
-        service_rows
+    region_level = "시도"
+
+    dm6_values = pd.to_numeric(
+        survey["DM6"],
+        errors="coerce",
     )
 
-    service_df = service_df.sort_values(
-        "이용자 비율(%)",
-        ascending=False,
-    ).reset_index(
-        drop=True
+    region_codes = dm6_values.map(
+        DM6_TO_SIDO_CODE
+    )
+
+    geojson_url = SIDO_URL
+
+    code_note = (
+        "`DM6` 값을 2자리 "
+        "시도 코드로 변환"
+    )
+
+
+else:
+
+    st.error(
+        "지역 코드를 찾지 못했습니다. "
+        "시군구 지도에는 5자리 `코드` 열이 "
+        "필요하며, 시도 지도에는 `DM6` 열이 "
+        "필요합니다."
+    )
+
+    st.stop()
+
+
+# =========================================================
+# 경계 파일 읽기
+# =========================================================
+try:
+
+    geojson = load_geojson(
+        geojson_url
+    )
+
+except Exception as error:
+
+    st.error(
+        "경계 GeoJSON을 읽지 못했습니다: "
+        f"{error}"
+    )
+
+    st.stop()
+
+
+# =========================================================
+# 점수 및 지역별 비율 계산
+# =========================================================
+literacy_scores = (
+    calculate_literacy_scores(
+        survey,
+        selected_columns,
+        minimum_answer_count,
+    )
+)
+
+
+weights, weight_note = (
+    get_weights(
+        survey
+    )
+)
+
+
+regional_result = (
+    aggregate_by_region(
+        region_codes,
+        literacy_scores,
+        weights,
+        threshold,
+    )
+)
+
+
+if regional_result.empty:
+
+    st.error(
+        "유효한 AI 리터러시 응답과 "
+        "지역 코드가 없어 지도를 "
+        "만들 수 없습니다."
+    )
+
+    st.stop()
+
+
+boundary_data = get_boundary_table(
+    geojson,
+    region_level,
+)
+
+
+map_data = boundary_data.merge(
+    regional_result,
+    on="코드",
+    how="left",
+)
+
+
+# 표본이 적은 지역은 색상에서 제외
+small_sample_mask = (
+    map_data["응답자수"]
+    .fillna(0)
+    < minimum_region_sample
+)
+
+
+map_data.loc[
+    small_sample_mask,
+    [
+        "AI 리터러시 비율(%)",
+        "평균 리터러시 점수",
+    ],
+] = float("nan")
+
+
+# =========================================================
+# 전국 지표 계산
+# =========================================================
+valid_mask = (
+    literacy_scores.notna()
+    & weights.notna()
+    & weights.gt(0)
+)
+
+
+valid_weights = weights.where(
+    valid_mask
+)
+
+
+valid_weight_sum = (
+    valid_weights.sum()
+)
+
+
+if valid_weight_sum > 0:
+
+    national_high_rate = (
+        (
+            literacy_scores
+            .ge(threshold)
+            .astype(float)
+            * valid_weights
+        ).sum()
+        / valid_weight_sum
+        * 100
+    )
+
+    national_average_score = (
+        (
+            literacy_scores
+            * valid_weights
+        ).sum()
+        / valid_weight_sum
     )
 
 else:
 
-    service_df = pd.DataFrame()
-
-
-top_service = "계산 불가"
-top_service_rate = float("nan")
-
-if not service_df.empty:
-
-    top_service = service_df.iloc[
-        0
-    ]["서비스"]
-
-    top_service_rate = service_df.iloc[
-        0
-    ]["이용자 비율(%)"]
-
-
-# =========================================================
-# 교육 격차 계산
-# =========================================================
-education_rows = []
-
-for area, (
-    experience_column,
-    need_column,
-) in EDUCATION.items():
-
-    if (
-        experience_column not in filtered.columns
-        or need_column not in filtered.columns
-    ):
-        continue
-
-    experience = number(
-        filtered,
-        experience_column,
+    national_high_rate = (
+        float("nan")
     )
 
-    need = number(
-        filtered,
-        need_column,
-    )
-
-    gap = need - experience
-
-    education_rows.append(
-        {
-            "교육 영역": area,
-            "교육 경험(4점)": weighted_mean(
-                experience,
-                weights,
-            ),
-            "교육 필요성(4점)": weighted_mean(
-                need,
-                weights,
-            ),
-            "교육 격차": weighted_mean(
-                gap,
-                weights,
-            ),
-        }
+    national_average_score = (
+        float("nan")
     )
 
 
-if education_rows:
-
-    education_df = pd.DataFrame(
-        education_rows
+matched_region_count = (
+    regional_result[
+        "코드"
+    ]
+    .isin(
+        boundary_data["코드"]
     )
-
-    education_df = education_df.sort_values(
-        "교육 격차",
-        ascending=False,
-    ).reset_index(
-        drop=True
-    )
-
-else:
-
-    education_df = pd.DataFrame()
-
-
-largest_gap_area = "계산 불가"
-largest_gap = float("nan")
-
-if not education_df.empty:
-
-    largest_gap_area = education_df.iloc[
-        0
-    ]["교육 영역"]
-
-    largest_gap = education_df.iloc[
-        0
-    ]["교육 격차"]
-
-
-# =========================================================
-# 핵심 지표 화면
-# =========================================================
-st.subheader(
-    "핵심 지표"
+    .sum()
 )
 
-column1, column2, column3 = st.columns(
-    3
+
+# =========================================================
+# 핵심 지표 표시
+# =========================================================
+column1, column2, column3, column4 = (
+    st.columns(4)
 )
+
 
 with column1:
 
     st.metric(
-        "분석 응답자",
-        f"{len(filtered):,}명",
+        "유효 응답자",
+        f"{valid_mask.sum():,}명",
     )
+
 
 with column2:
 
     st.metric(
-        "생성형 AI 이용률",
-        show_value(
-            ai_use_rate,
-            1,
-            "%",
-        ),
+        "전국 고리터러시 비율",
+        f"{national_high_rate:.1f}%",
     )
+
 
 with column3:
 
     st.metric(
-        "종합 AI 리터러시",
-        show_value(
-            overall_literacy,
-            2,
-            " / 5",
-        ),
+        "전국 평균 점수",
+        f"{national_average_score:.2f} / 5",
     )
 
-
-column4, column5, column6 = st.columns(
-    3
-)
 
 with column4:
 
     st.metric(
-        "추정 평균 사용시간",
-        show_value(
-            average_minutes,
-            1,
-            "분",
-        ),
-        help=(
-            "Q7 응답 범주를 "
-            "15·45·75·105·135분으로 환산한 추정치입니다."
-        ),
+        "지도 결합 지역",
+        f"{matched_region_count:,}개",
     )
 
-with column5:
-
-    st.metric(
-        "가장 많이 이용하는 서비스",
-        top_service,
-    )
-
-    if not pd.isna(
-        top_service_rate
-    ):
-
-        st.caption(
-            f"가끔 이상 이용자 {top_service_rate:.1f}%"
-        )
-
-with column6:
-
-    st.metric(
-        "가장 큰 교육 격차",
-        largest_gap_area,
-        help=(
-            "교육 필요성 Q19에서 "
-            "교육 경험 Q18을 뺀 값입니다."
-        ),
-    )
-
-    if not pd.isna(
-        largest_gap
-    ):
-
-        st.caption(
-            f"필요성 - 경험 = {largest_gap:+.2f}점"
-        )
-
-
-st.divider()
-
-
-# =========================================================
-# AI 리터러시 영역별 평균
-# =========================================================
-st.subheader(
-    "AI 리터러시 영역별 평균"
-)
-
-literacy_rows = []
-
-for area, columns in LITERACY.items():
-
-    score = weighted_mean(
-        row_average(
-            filtered,
-            columns,
-        ),
-        weights,
-    )
-
-    if not pd.isna(score):
-
-        literacy_rows.append(
-            {
-                "리터러시 영역": area,
-                "평균 점수": score,
-            }
-        )
-
-
-literacy_df = pd.DataFrame(
-    literacy_rows
-)
-
-
-if literacy_df.empty:
-
-    st.warning(
-        "Q14 문항이 없어 리터러시를 계산할 수 없습니다."
-    )
-
-else:
-
-    literacy_chart = literacy_df.set_index(
-        "리터러시 영역"
-    )[
-        [
-            "평균 점수",
-        ]
-    ]
-
-    st.bar_chart(
-        literacy_chart
-    )
-
-    literacy_table = literacy_df.copy()
-
-    literacy_table[
-        "평균 점수"
-    ] = literacy_table[
-        "평균 점수"
-    ].round(2)
-
-    st.dataframe(
-        literacy_table,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-st.divider()
-
-
-# =========================================================
-# 서비스별 이용 현황
-# =========================================================
-st.subheader(
-    "서비스별 이용 현황"
-)
 
 st.caption(
-    "Q6에서 '가끔 사용한다(3점)' 이상으로 응답한 비율입니다."
+    f"원자료: {survey_file_name}"
+    f" · 행정단위: {region_level}"
+    f" · {weight_note}"
+    f" · {code_note}"
 )
 
 
-if service_df.empty:
+# =========================================================
+# 지도 표시
+# =========================================================
+figure = create_choropleth(
+    map_data=map_data,
+    geojson=geojson,
+    region_level=region_level,
+    threshold=threshold,
+)
+
+
+st.plotly_chart(
+    figure,
+    use_container_width=True,
+    config={
+        "displayModeBar": False,
+    },
+)
+
+
+if region_level == "시도":
 
     st.warning(
-        "Q6 문항이 없어 서비스별 이용률을 계산할 수 없습니다."
+        "현재 원자료에는 시군구 5자리 코드가 "
+        "없어 코드북의 `DM6`를 이용한 "
+        "시도 단위 지도를 표시했습니다. "
+        "시군구 지도를 만들려면 응답자별 "
+        "5자리 `코드` 열이 필요합니다."
     )
-
-else:
-
-    service_chart = service_df.set_index(
-        "서비스"
-    )[
-        [
-            "이용자 비율(%)",
-        ]
-    ]
-
-    st.bar_chart(
-        service_chart
-    )
-
-    service_table = service_df.copy()
-
-    service_table[
-        "이용자 비율(%)"
-    ] = service_table[
-        "이용자 비율(%)"
-    ].round(1)
-
-    service_table[
-        "평균 빈도(5점)"
-    ] = service_table[
-        "평균 빈도(5점)"
-    ].round(2)
-
-    st.dataframe(
-        service_table,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-st.divider()
 
 
 # =========================================================
-# 교육 경험과 필요성
+# 매칭되지 않은 코드 확인
+# =========================================================
+unmatched_codes = regional_result.loc[
+    ~regional_result["코드"].isin(
+        boundary_data["코드"]
+    ),
+    "코드",
+].tolist()
+
+
+if unmatched_codes:
+
+    with st.expander(
+        "경계 파일과 매칭되지 않은 코드"
+    ):
+
+        st.write(
+            ", ".join(
+                unmatched_codes
+            )
+        )
+
+
+# =========================================================
+# 지역 순위표
 # =========================================================
 st.subheader(
-    "교육 경험과 교육 필요성"
-)
-
-st.caption(
-    "교육 격차가 클수록 필요성에 비해 실제 교육 경험이 부족합니다."
+    f"{region_level}별 AI 리터러시 순위"
 )
 
 
-if education_df.empty:
-
-    st.warning(
-        "Q18·Q19 문항이 없어 교육 격차를 계산할 수 없습니다."
-    )
-
-else:
-
-    education_chart = education_df.set_index(
-        "교육 영역"
-    )[
-        [
-            "교육 경험(4점)",
-            "교육 필요성(4점)",
-        ]
+ranking = map_data.dropna(
+    subset=[
+        "AI 리터러시 비율(%)",
     ]
-
-    st.bar_chart(
-        education_chart
-    )
-
-    education_table = education_df.copy()
-
-    for column in [
-        "교육 경험(4점)",
-        "교육 필요성(4점)",
-        "교육 격차",
-    ]:
-
-        education_table[
-            column
-        ] = education_table[
-            column
-        ].round(2)
-
-    st.dataframe(
-        education_table,
-        use_container_width=True,
-        hide_index=True,
-    )
+).copy()
 
 
-st.divider()
-
-
-# =========================================================
-# 결과 자동 요약
-# =========================================================
-st.subheader(
-    "결과 자동 요약"
+ranking = ranking.sort_values(
+    "AI 리터러시 비율(%)",
+    ascending=False,
 )
 
 
-if not pd.isna(
-    ai_use_rate
+ranking[
+    "AI 리터러시 비율(%)"
+] = ranking[
+    "AI 리터러시 비율(%)"
+].round(1)
+
+
+ranking[
+    "평균 리터러시 점수"
+] = ranking[
+    "평균 리터러시 점수"
+].round(2)
+
+
+st.dataframe(
+    ranking[
+        [
+            "지역명",
+            "코드",
+            "응답자수",
+            "평균 리터러시 점수",
+            "AI 리터러시 비율(%)",
+        ]
+    ],
+    use_container_width=True,
+    hide_index=True,
+)
+
+
+# =========================================================
+# 코드북 문항 확인
+# =========================================================
+with st.expander(
+    "사용한 코드북 Q14 문항"
 ):
 
-    st.markdown(
-        f"- 생성형 AI 이용률은 "
-        f"**{ai_use_rate:.1f}%**입니다."
-    )
+    q14_table = codebook[
+        codebook["변수"].isin(
+            selected_columns
+        )
+    ][
+        [
+            "변수",
+            "변수설명",
+        ]
+    ].drop_duplicates()
 
-
-if not literacy_df.empty:
-
-    strongest = literacy_df.loc[
-        literacy_df[
-            "평균 점수"
-        ].idxmax()
-    ]
-
-    weakest = literacy_df.loc[
-        literacy_df[
-            "평균 점수"
-        ].idxmin()
-    ]
-
-    st.markdown(
-        f"- 가장 높은 리터러시는 "
-        f"**{strongest['리터러시 영역']} "
-        f"({strongest['평균 점수']:.2f}점)**이고, "
-        f"가장 낮은 영역은 "
-        f"**{weakest['리터러시 영역']} "
-        f"({weakest['평균 점수']:.2f}점)**입니다."
-    )
-
-
-if not service_df.empty:
-
-    st.markdown(
-        f"- 가장 널리 이용되는 서비스는 "
-        f"**{top_service}**이며, "
-        f"가끔 이상 이용자는 "
-        f"**{top_service_rate:.1f}%**입니다."
-    )
-
-
-if not education_df.empty:
-
-    st.markdown(
-        f"- 교육 격차가 가장 큰 영역은 "
-        f"**{largest_gap_area} "
-        f"({largest_gap:+.2f}점)**입니다."
+    st.dataframe(
+        q14_table,
+        use_container_width=True,
+        hide_index=True,
     )
 
 
@@ -1213,59 +1388,27 @@ with st.expander(
 ):
 
     st.write(
-        f"전체 원자료: "
-        f"**{raw.shape[0]:,}행 × {raw.shape[1]:,}열**"
+        f"원자료 크기: "
+        f"{survey.shape[0]:,}행 × "
+        f"{survey.shape[1]:,}열"
     )
 
     st.write(
-        f"필터 적용 후: "
-        f"**{filtered.shape[0]:,}명**"
+        f"사용한 Q14 문항: "
+        f"{len(selected_columns):,}개"
     )
 
     st.write(
-        f"가중치: "
-        f"**{weight_note}**"
+        f"유효한 지역 코드: "
+        f"{region_codes.notna().sum():,}개"
     )
 
-    required_variables = (
-        [
-            "Q4",
-            "Q7",
-            "wgt_b",
-        ]
-        + all_literacy_columns
-        + list(
-            SERVICES.values()
-        )
-        + [
-            variable
-            for pair in EDUCATION.values()
-            for variable in pair
-        ]
-        + list(
-            FILTERS.values()
-        )
+    st.write(
+        f"유효한 AI 리터러시 응답: "
+        f"{valid_mask.sum():,}개"
     )
 
-    missing_variables = sorted(
-        {
-            variable
-            for variable in required_variables
-            if variable not in raw.columns
-        }
+    st.write(
+        f"경계와 결합된 지역: "
+        f"{matched_region_count:,}개"
     )
-
-    if missing_variables:
-
-        st.warning(
-            "원자료에서 찾지 못한 변수: "
-            + ", ".join(
-                missing_variables
-            )
-        )
-
-    else:
-
-        st.success(
-            "이 페이지에 필요한 주요 변수가 모두 있습니다."
-        )
