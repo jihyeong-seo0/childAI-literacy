@@ -1,6 +1,5 @@
 import json
 import re
-from io import BytesIO
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -20,39 +19,32 @@ st.set_page_config(
 
 
 # =========================================================
-# 파일 및 URL 설정
+# 파일 설정
 # =========================================================
-CODEBOOK_NAME = (
-    "(코드북) 청소년의 생성형 AI 이용실태 및 "
-    "리터러시 증진방안 연구.csv"
-)
-
-RAW_DATA_NAME = (
-    "청소년의 생성형 AI 이용실태 및 "
-    "리터러시 증진방안 연구.csv"
-)
-
 BASE_DIR = Path(__file__).resolve().parent
 
-CODEBOOK_PATH = BASE_DIR / CODEBOOK_NAME
-RAW_DATA_PATH = BASE_DIR / RAW_DATA_NAME
-
-
-SIGUNGU_URL = (
-    "https://raw.githubusercontent.com/"
-    "greatsong/modudata/main/data/boundaries/"
-    "sigungu_kr.geojson"
+# 보내주신 원자료 이름을 그대로 사용합니다.
+DATA_NAME = (
+    "(데이터) 청소년의 생성형 AI 이용실태 및 "
+    "리터러시 증진방안 연구.csv"
 )
 
-SIDO_URL = (
+DATA_PATH = BASE_DIR / DATA_NAME
+
+# 원자료 ID와 읍면동 코드를 연결하는 추가 파일
+MAPPING_NAME = "응답자_읍면동코드.csv"
+MAPPING_PATH = BASE_DIR / MAPPING_NAME
+
+# 전국 행정동 경계
+GEOJSON_URL = (
     "https://raw.githubusercontent.com/"
-    "greatsong/modudata/main/data/boundaries/"
-    "sido_kr.geojson"
+    "greatsong/modudata/main/data/"
+    "hangjeongdong.geojson"
 )
 
 
 # =========================================================
-# 코드북 Q14 AI 리터러시 문항
+# AI 리터러시 문항
 # =========================================================
 LITERACY_GROUPS = {
     "정보 점검": [
@@ -77,7 +69,7 @@ LITERACY_GROUPS = {
     ],
 }
 
-ALL_Q14_COLUMNS = [
+ALL_LITERACY_COLUMNS = [
     column
     for columns in LITERACY_GROUPS.values()
     for column in columns
@@ -85,144 +77,62 @@ ALL_Q14_COLUMNS = [
 
 
 # =========================================================
-# 코드북 DM6 → 행정구역 시도 코드
-# =========================================================
-DM6_TO_SIDO_CODE = {
-    1: "11",    # 서울
-    2: "26",    # 부산
-    3: "27",    # 대구
-    4: "28",    # 인천
-    5: "29",    # 광주
-    6: "30",    # 대전
-    7: "31",    # 울산
-    8: "36",    # 세종
-    9: "41",    # 경기
-    10: "51",   # 강원
-    11: "43",   # 충북
-    12: "44",   # 충남
-    13: "52",   # 전북
-    14: "46",   # 전남
-    15: "47",   # 경북
-    16: "48",   # 경남
-    17: "50",   # 제주
-}
-
-
-# =========================================================
 # CSV 읽기
 # =========================================================
-def read_csv_flexible(source):
+def read_csv_flexible(file_path):
     """
-    UTF-8-SIG, CP949, UTF-8 순서로 CSV를 읽습니다.
+    UTF-8-SIG, UTF-8, CP949 순서로 CSV를 읽습니다.
     """
 
-    encodings = (
+    encodings = [
         "utf-8-sig",
-        "cp949",
         "utf-8",
-    )
+        "cp949",
+    ]
 
-    if isinstance(source, (str, Path)):
-        for encoding in encodings:
-            try:
-                return pd.read_csv(
-                    source,
-                    encoding=encoding,
-                    low_memory=False,
-                )
+    last_error = None
 
-            except UnicodeDecodeError:
-                continue
+    for encoding in encodings:
+        try:
+            data = pd.read_csv(
+                file_path,
+                encoding=encoding,
+                low_memory=False,
+            )
 
-    else:
-        if hasattr(source, "getvalue"):
-            raw_bytes = source.getvalue()
-        else:
-            raw_bytes = source.read()
+            data.columns = (
+                data.columns
+                .astype(str)
+                .str.strip()
+            )
 
-        for encoding in encodings:
-            try:
-                return pd.read_csv(
-                    BytesIO(raw_bytes),
-                    encoding=encoding,
-                    low_memory=False,
-                )
+            return data
 
-            except UnicodeDecodeError:
-                continue
+        except UnicodeDecodeError as error:
+            last_error = error
 
     raise ValueError(
-        "CSV 파일의 인코딩을 확인할 수 없습니다."
+        f"CSV 인코딩을 확인할 수 없습니다: {last_error}"
     )
 
 
 @st.cache_data
-def load_codebook(path_string):
-    """
-    코드북을 읽고 변수명의 빈칸을 앞의 값으로 채웁니다.
-    """
-
-    codebook = read_csv_flexible(path_string)
-
-    codebook.columns = (
-        codebook.columns
-        .astype(str)
-        .str.strip()
-    )
-
-    required_columns = {
-        "변수",
-        "변수설명",
-        "변수값",
-        "레이블",
-    }
-
-    if not required_columns.issubset(
-        codebook.columns
-    ):
-        raise ValueError(
-            "코드북에 변수, 변수설명, "
-            "변수값, 레이블 열이 필요합니다."
-        )
-
-    codebook[
-        [
-            "변수",
-            "변수설명",
-        ]
-    ] = codebook[
-        [
-            "변수",
-            "변수설명",
-        ]
-    ].ffill()
-
-    return codebook
+def load_survey_data(path_string):
+    return read_csv_flexible(path_string)
 
 
 @st.cache_data
-def load_uploaded_data(raw_bytes):
-    """
-    업로드한 설문 원자료를 읽습니다.
-    """
-
-    data = read_csv_flexible(
-        BytesIO(raw_bytes)
-    )
-
-    data.columns = (
-        data.columns
-        .astype(str)
-        .str.strip()
-    )
-
-    return data
+def load_mapping_data(path_string):
+    return read_csv_flexible(path_string)
 
 
+# =========================================================
+# GeoJSON 읽기
+# =========================================================
 @st.cache_data(ttl=86400)
 def load_geojson(url):
     """
-    GitHub에서 GeoJSON 경계 파일을 읽습니다.
+    전국 행정동 GeoJSON을 불러옵니다.
     """
 
     request = Request(
@@ -234,24 +144,38 @@ def load_geojson(url):
 
     with urlopen(
         request,
-        timeout=60,
+        timeout=120,
     ) as response:
-
-        text = response.read().decode(
-            "utf-8"
-        )
+        text = response.read().decode("utf-8")
 
     return json.loads(text)
 
 
 # =========================================================
-# 지역 코드 처리
+# 코드 정리
 # =========================================================
-def normalize_sigungu_code(value):
+def normalize_id(value):
     """
-    시군구 코드를 문자열 5자리로 정리합니다.
+    ID를 문자열로 통일합니다.
+    """
 
-    10자리 행정동 코드가 들어오면 앞 5자리를 사용합니다.
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+
+    text = re.sub(
+        r"\.0$",
+        "",
+        text,
+    )
+
+    return text if text else None
+
+
+def normalize_dong_code(value):
+    """
+    행정안전부 행정기관코드를 10자리 문자열로 정리합니다.
     """
 
     if pd.isna(value):
@@ -271,93 +195,242 @@ def normalize_sigungu_code(value):
         text,
     )
 
-    if len(digits) >= 10:
-        return digits[:5]
-
-    if len(digits) == 5:
+    if len(digits) == 10:
         return digits
 
     return None
 
 
-def find_sigungu_code_column(data):
+# =========================================================
+# 원자료에 읍면동 코드 연결
+# =========================================================
+def attach_dong_codes(survey):
     """
-    원자료에서 시군구 코드로 사용할 열을 찾습니다.
+    원자료 안에 읍면동 코드가 있으면 사용합니다.
+
+    없으면 응답자_읍면동코드.csv를 ID 기준으로 결합합니다.
     """
 
-    candidates = [
+    code_candidates = [
         "코드",
-        "시군구코드",
+        "읍면동코드",
+        "행정동코드",
+        "행정기관코드",
         "지역코드",
-        "행정구역코드",
-        "code",
-        "CODE",
+        "adm_cd2",
     ]
 
-    for column in candidates:
-
-        if column not in data.columns:
+    # 원자료 자체에서 코드 찾기
+    for column in code_candidates:
+        if column not in survey.columns:
             continue
 
-        codes = data[column].map(
-            normalize_sigungu_code
+        normalized = survey[column].map(
+            normalize_dong_code
         )
 
-        if codes.notna().any():
-            return column, codes
+        if normalized.notna().any():
+            result = survey.copy()
+            result["읍면동코드"] = normalized
 
-    empty_codes = pd.Series(
-        index=data.index,
-        dtype="object",
+            return (
+                result,
+                f"원자료의 `{column}` 열 사용",
+            )
+
+    # 원자료에 없으면 연결표 사용
+    if not MAPPING_PATH.exists():
+        return None, None
+
+    mapping = load_mapping_data(
+        str(MAPPING_PATH)
     )
 
-    return None, empty_codes
+    required_columns = {
+        "ID",
+        "코드",
+    }
+
+    if not required_columns.issubset(
+        mapping.columns
+    ):
+        raise ValueError(
+            f"{MAPPING_NAME}에는 ID와 코드 열이 필요합니다."
+        )
+
+    survey_copy = survey.copy()
+    mapping_copy = mapping.copy()
+
+    survey_copy["ID_결합"] = survey_copy[
+        "ID"
+    ].map(normalize_id)
+
+    mapping_copy["ID_결합"] = mapping_copy[
+        "ID"
+    ].map(normalize_id)
+
+    mapping_copy["읍면동코드"] = mapping_copy[
+        "코드"
+    ].map(normalize_dong_code)
+
+    mapping_copy = (
+        mapping_copy[
+            [
+                "ID_결합",
+                "읍면동코드",
+            ]
+        ]
+        .dropna(
+            subset=[
+                "ID_결합",
+                "읍면동코드",
+            ]
+        )
+        .drop_duplicates(
+            subset=["ID_결합"],
+            keep="first",
+        )
+    )
+
+    result = survey_copy.merge(
+        mapping_copy,
+        on="ID_결합",
+        how="left",
+        validate="one_to_one",
+    )
+
+    return (
+        result,
+        f"`{MAPPING_NAME}`을 ID 기준으로 결합",
+    )
 
 
 # =========================================================
-# AI 리터러시 계산
+# GeoJSON 속성 정리
 # =========================================================
-def calculate_literacy_scores(
+def prepare_geojson(geojson):
+    """
+    GeoJSON의 코드를 10자리 문자열로 통일하고
+    지도 결합용 속성을 추가합니다.
+    """
+
+    prepared_features = []
+    boundary_rows = []
+
+    for feature in geojson.get(
+        "features",
+        [],
+    ):
+        properties = feature.get(
+            "properties",
+            {},
+        )
+
+        raw_code = properties.get(
+            "adm_cd2"
+        )
+
+        raw_name = properties.get(
+            "adm_nm"
+        )
+
+        code = normalize_dong_code(
+            raw_code
+        )
+
+        if code is None:
+            continue
+
+        region_name = (
+            str(raw_name).strip()
+            if raw_name is not None
+            else code
+        )
+
+        properties[
+            "지도코드"
+        ] = code
+
+        properties[
+            "읍면동명"
+        ] = region_name
+
+        feature[
+            "properties"
+        ] = properties
+
+        prepared_features.append(
+            feature
+        )
+
+        boundary_rows.append(
+            {
+                "읍면동코드": code,
+                "읍면동": region_name,
+            }
+        )
+
+    prepared_geojson = {
+        "type": "FeatureCollection",
+        "features": prepared_features,
+    }
+
+    boundary_table = (
+        pd.DataFrame(boundary_rows)
+        .drop_duplicates(
+            subset=["읍면동코드"]
+        )
+    )
+
+    return (
+        prepared_geojson,
+        boundary_table,
+    )
+
+
+# =========================================================
+# 리터러시 점수 계산
+# =========================================================
+def calculate_literacy_score(
     data,
-    columns,
-    minimum_answer_count,
+    selected_columns,
+    minimum_answers,
 ):
     """
-    Q14 문항의 개인별 평균을 계산합니다.
+    응답자별 AI 리터러시 평균을 계산합니다.
     """
 
     answers = (
-        data[columns]
+        data[selected_columns]
         .apply(
             pd.to_numeric,
             errors="coerce",
         )
     )
 
-    answer_count = (
+    valid_answer_count = (
         answers
         .notna()
         .sum(axis=1)
     )
 
-    scores = answers.mean(
+    average_score = answers.mean(
         axis=1,
         skipna=True,
     )
 
-    return scores.where(
-        answer_count
-        >= minimum_answer_count
+    return average_score.where(
+        valid_answer_count
+        >= minimum_answers
     )
 
 
 def get_weights(data):
     """
-    wgt_b가 있으면 표준화 가중치를 사용합니다.
+    wgt_b가 있으면 가중치를 적용합니다.
     """
 
     if "wgt_b" in data.columns:
-
         weights = pd.to_numeric(
             data["wgt_b"],
             errors="coerce",
@@ -370,46 +443,48 @@ def get_weights(data):
         if weights.notna().any():
             return (
                 weights,
-                "표준화 가중치(wgt_b) 적용",
+                "표준화 가중치 wgt_b 적용",
             )
 
-    default_weights = pd.Series(
-        1.0,
-        index=data.index,
-    )
-
     return (
-        default_weights,
+        pd.Series(
+            1.0,
+            index=data.index,
+        ),
         "가중치 없음",
     )
 
 
-def aggregate_by_region(
-    region_codes,
-    literacy_scores,
+# =========================================================
+# 읍면동별 집계
+# =========================================================
+def aggregate_literacy(
+    data,
+    literacy_score,
     weights,
     threshold,
 ):
     """
-    지역별 고리터러시 응답자 비율과
-    평균 리터러시 점수를 계산합니다.
+    읍면동별 고리터러시 비율과 평균 점수를 계산합니다.
     """
 
     working = pd.DataFrame(
         {
-            "코드": region_codes,
-            "리터러시점수": literacy_scores,
+            "읍면동코드": data[
+                "읍면동코드"
+            ],
+            "리터러시점수": literacy_score,
             "가중치": weights,
         }
     )
 
     working = working.dropna(
         subset=[
-            "코드",
+            "읍면동코드",
             "리터러시점수",
             "가중치",
         ]
-    )
+    ).copy()
 
     working = working[
         working["가중치"] > 0
@@ -419,13 +494,16 @@ def aggregate_by_region(
         return pd.DataFrame()
 
     working[
+        "고리터러시"
+    ] = working[
+        "리터러시점수"
+    ].ge(threshold)
+
+    working[
         "고리터러시가중치"
     ] = (
-        working[
-            "리터러시점수"
-        ].ge(
-            threshold
-        ).astype(float)
+        working["고리터러시"]
+        .astype(float)
         * working["가중치"]
     )
 
@@ -439,7 +517,7 @@ def aggregate_by_region(
     result = (
         working
         .groupby(
-            "코드",
+            "읍면동코드",
             as_index=False,
         )
         .agg(
@@ -447,7 +525,7 @@ def aggregate_by_region(
                 "리터러시점수",
                 "size",
             ),
-            전체가중치=(
+            가중치합=(
                 "가중치",
                 "sum",
             ),
@@ -465,8 +543,10 @@ def aggregate_by_region(
     result[
         "AI 리터러시 비율(%)"
     ] = (
-        result["고리터러시가중치"]
-        / result["전체가중치"]
+        result[
+            "고리터러시가중치"
+        ]
+        / result["가중치합"]
         * 100
     )
 
@@ -474,12 +554,12 @@ def aggregate_by_region(
         "평균 리터러시 점수"
     ] = (
         result["점수가중합"]
-        / result["전체가중치"]
+        / result["가중치합"]
     )
 
     return result[
         [
-            "코드",
+            "읍면동코드",
             "응답자수",
             "평균 리터러시 점수",
             "AI 리터러시 비율(%)",
@@ -488,111 +568,63 @@ def aggregate_by_region(
 
 
 # =========================================================
-# GeoJSON 속성 처리
+# 전국 수치 계산
 # =========================================================
-def get_boundary_table(
-    geojson,
-    region_level,
+def calculate_national_values(
+    scores,
+    weights,
+    threshold,
 ):
-    """
-    GeoJSON에서 코드와 지역 이름을 가져옵니다.
-    """
-
-    if region_level == "시군구":
-        name_candidates = [
-            "시군구",
-            "sggnm",
-            "SIG_KOR_NM",
-            "name",
-        ]
-
-    else:
-        name_candidates = [
-            "시도",
-            "sidonm",
-            "CTP_KOR_NM",
-            "name",
-        ]
-
-    features = geojson.get(
-        "features",
-        [],
+    valid = (
+        scores.notna()
+        & weights.notna()
+        & weights.gt(0)
     )
 
-    if not features:
-        return pd.DataFrame(
-            columns=[
-                "코드",
-                "지역명",
-            ]
+    if not valid.any():
+        return (
+            float("nan"),
+            float("nan"),
+            0,
         )
 
-    first_properties = (
-        features[0]
-        .get(
-            "properties",
-            {},
-        )
+    valid_scores = scores[valid]
+    valid_weights = weights[valid]
+
+    weight_sum = valid_weights.sum()
+
+    average_score = (
+        valid_scores
+        * valid_weights
+    ).sum() / weight_sum
+
+    high_rate = (
+        valid_scores
+        .ge(threshold)
+        .astype(float)
+        .mul(valid_weights)
+        .sum()
+        / weight_sum
+        * 100
     )
-
-    name_property = next(
-        (
-            key
-            for key in name_candidates
-            if key in first_properties
-        ),
-        None,
-    )
-
-    rows = []
-
-    for feature in features:
-
-        properties = feature.get(
-            "properties",
-            {},
-        )
-
-        code = str(
-            properties.get(
-                "코드",
-                "",
-            )
-        ).strip()
-
-        name = str(
-            properties.get(
-                name_property,
-                code,
-            )
-        ).strip()
-
-        rows.append(
-            {
-                "코드": code,
-                "지역명": name,
-            }
-        )
 
     return (
-        pd.DataFrame(rows)
-        .drop_duplicates(
-            subset=["코드"]
-        )
+        float(average_score),
+        float(high_rate),
+        int(valid.sum()),
     )
 
 
 # =========================================================
-# Plotly 단계구분도
+# 단계구분도
 # =========================================================
-def create_choropleth(
+def create_map(
     map_data,
     geojson,
-    region_level,
     threshold,
 ):
     """
-    배경 타일 없이 행정구역 경계와 색상만 표시합니다.
+    배경 타일 없이 경계만 표시하는 단계구분도입니다.
     """
 
     colored_data = map_data.dropna(
@@ -601,103 +633,79 @@ def create_choropleth(
         ]
     ).copy()
 
-    values = colored_data[
-        "AI 리터러시 비율(%)"
-    ]
-
-    if values.empty:
-        color_min = 0.0
-        color_max = 100.0
-
-    else:
-        color_min = max(
-            0.0,
-            float(values.min()) - 5,
-        )
-
-        color_max = min(
-            100.0,
-            float(values.max()) + 5,
-        )
-
-        if color_max <= color_min:
-            color_min = max(
-                0.0,
-                color_min - 1,
-            )
-
-            color_max = min(
-                100.0,
-                color_max + 1,
-            )
-
     figure = go.Figure()
 
-    # 전국 경계
+    # 데이터가 없는 읍면동의 기본 경계
     figure.add_trace(
         go.Choropleth(
             geojson=geojson,
-            locations=map_data["코드"],
-            z=[0] * len(map_data),
-            featureidkey="properties.코드",
+            locations=map_data[
+                "읍면동코드"
+            ],
+            z=[
+                0
+            ] * len(map_data),
+            featureidkey=(
+                "properties.지도코드"
+            ),
             colorscale=[
                 [
                     0,
-                    "#eef1f5",
+                    "#eeeeee",
                 ],
                 [
                     1,
-                    "#eef1f5",
+                    "#eeeeee",
                 ],
             ],
             showscale=False,
-            marker_line_color="white",
-            marker_line_width=0.7,
+            marker_line_color="#ffffff",
+            marker_line_width=0.25,
             hoverinfo="skip",
         )
     )
 
-    # AI 리터러시 비율
+    # 실제 리터러시 비율
     figure.add_trace(
         go.Choropleth(
             geojson=geojson,
-            locations=colored_data["코드"],
+            locations=colored_data[
+                "읍면동코드"
+            ],
             z=colored_data[
                 "AI 리터러시 비율(%)"
             ],
-            featureidkey="properties.코드",
+            featureidkey=(
+                "properties.지도코드"
+            ),
             colorscale="Blues",
-            zmin=color_min,
-            zmax=color_max,
-            marker_line_color="white",
-            marker_line_width=0.7,
+            zmin=0,
+            zmax=100,
+            marker_line_color="#ffffff",
+            marker_line_width=0.3,
             colorbar={
                 "title": {
                     "text": (
-                        "고리터러시"
+                        "AI 리터러시"
                         "<br>비율(%)"
                     ),
                 },
                 "ticksuffix": "%",
                 "thickness": 16,
-                "len": 0.72,
+                "len": 0.7,
             },
             customdata=colored_data[
                 [
-                    "지역명",
+                    "읍면동",
                     "응답자수",
                     "평균 리터러시 점수",
                 ]
             ],
             hovertemplate=(
-                f"<b>{region_level}: "
-                "%{customdata[0]}</b><br>"
-                "AI 리터러시 비율: "
-                "%{z:.1f}%<br>"
-                "평균 점수: "
-                "%{customdata[2]:.2f} / 5<br>"
-                "유효 응답자: "
-                "%{customdata[1]:,.0f}명"
+                "<b>%{customdata[0]}</b><br>"
+                "AI 리터러시 비율: %{z:.1f}%<br>"
+                "평균 점수: %{customdata[2]:.2f} / 5<br>"
+                "유효 응답자: %{customdata[1]:,.0f}명"
                 "<extra></extra>"
             ),
         )
@@ -713,79 +721,54 @@ def create_choropleth(
     figure.update_layout(
         title={
             "text": (
-                "전국 청소년 AI 리터러시 "
-                "단계구분도"
+                "전국 청소년 AI 리터러시 단계구분도"
                 "<br>"
-                f"<sup>{region_level}별 · "
-                f"평균 {threshold:.1f}점 이상 "
-                "응답자 비율</sup>"
+                f"<sup>읍면동별 평균 {threshold:.1f}점 "
+                "이상 응답자 비율</sup>"
             ),
             "x": 0.01,
             "xanchor": "left",
         },
-        height=760,
+        height=850,
         margin={
             "l": 0,
             "r": 0,
             "t": 80,
             "b": 0,
         },
-        paper_bgcolor=(
-            "rgba(0,0,0,0)"
-        ),
-        plot_bgcolor=(
-            "rgba(0,0,0,0)"
-        ),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
     )
 
     return figure
 
 
 # =========================================================
-# 화면 제목
+# 화면
 # =========================================================
 st.title(
     "🧠 전국 청소년 AI 리터러시 단계구분도"
 )
 
 st.caption(
-    "Q14의 정보 점검·AI 소통·창의적 활용·"
-    "윤리적 활용 12문항을 이용합니다."
+    "읍면동별 AI 리터러시가 높은 청소년의 비율을 표시합니다."
 )
 
 
-with st.expander(
-    "AI 리터러시 비율 계산 기준"
-):
-
-    st.markdown(
-        """
-- 응답자별 AI 리터러시 점수: 선택한 Q14 문항의 평균
-- 문항 점수 범위: 1점부터 5점
-- 고리터러시 응답자: 평균 점수가 설정한 기준 이상인 응답자
-- 지역별 AI 리터러시 비율: 고리터러시 응답자의 가중합 ÷ 유효 응답자의 가중합 × 100
-- `wgt_b`가 있으면 표준화 가중치를 사용하고, 없으면 단순 비율을 사용
-- 인구자료의 `계_` 열과 고령화율은 사용하지 않습니다.
-- 이번 비율의 분모는 Q14 문항에 유효하게 답한 설문 응답자입니다.
-        """
-    )
-
-
 # =========================================================
-# 코드북 읽기
+# 원자료 확인
 # =========================================================
-if not CODEBOOK_PATH.exists():
-
+if not DATA_PATH.exists():
     st.error(
-        "코드북 파일을 찾을 수 없습니다."
+        f"원자료 파일을 찾을 수 없습니다: {DATA_NAME}"
     )
 
     st.code(
         f"""프로젝트폴더/
 ├── main.py
 ├── requirements.txt
-├── {CODEBOOK_NAME}
-└── {RAW_DATA_NAME}""",
+├── {DATA_NAME}
+└── {MAPPING_NAME}""",
         language="text",
     )
 
@@ -793,96 +776,11 @@ if not CODEBOOK_PATH.exists():
 
 
 try:
-    codebook = load_codebook(
-        str(CODEBOOK_PATH)
+    survey = load_survey_data(
+        str(DATA_PATH)
     )
 
 except Exception as error:
-
-    st.error(
-        f"코드북을 읽지 못했습니다: {error}"
-    )
-
-    st.stop()
-
-
-# =========================================================
-# 원자료 업로드 또는 로컬 파일 읽기
-# =========================================================
-st.sidebar.header(
-    "데이터 설정"
-)
-
-uploaded_file = st.sidebar.file_uploader(
-    "학생별 설문 원자료 CSV",
-    type=["csv"],
-    help=(
-        "Q14 문항과 지역 코드가 포함된 "
-        "응답자별 원자료를 올리세요."
-    ),
-)
-
-
-if uploaded_file is not None:
-
-    st.session_state[
-        "survey_raw_bytes"
-    ] = uploaded_file.getvalue()
-
-    st.session_state[
-        "survey_file_name"
-    ] = uploaded_file.name
-
-
-try:
-
-    if (
-        "survey_raw_bytes"
-        in st.session_state
-    ):
-
-        survey = load_uploaded_data(
-            st.session_state[
-                "survey_raw_bytes"
-            ]
-        )
-
-        survey_file_name = (
-            st.session_state.get(
-                "survey_file_name",
-                "업로드 원자료",
-            )
-        )
-
-    elif RAW_DATA_PATH.exists():
-
-        survey = read_csv_flexible(
-            RAW_DATA_PATH
-        )
-
-        survey.columns = (
-            survey.columns
-            .astype(str)
-            .str.strip()
-        )
-
-        survey_file_name = (
-            RAW_DATA_NAME
-        )
-
-    else:
-
-        st.info(
-            "왼쪽에서 설문 원자료 CSV를 "
-            "업로드하거나 GitHub 저장소에 "
-            f"`{RAW_DATA_NAME}` 파일을 "
-            "넣어주세요."
-        )
-
-        st.stop()
-
-except Exception as error:
-
     st.error(
         f"원자료를 읽지 못했습니다: {error}"
     )
@@ -891,23 +789,91 @@ except Exception as error:
 
 
 # =========================================================
-# Q14 변수 확인
+# 필수 변수 확인
 # =========================================================
-missing_q14_columns = [
+missing_columns = [
     column
-    for column in ALL_Q14_COLUMNS
+    for column in ALL_LITERACY_COLUMNS
     if column not in survey.columns
 ]
 
-
-if missing_q14_columns:
-
+if missing_columns:
     st.error(
-        "원자료에서 다음 AI 리터러시 문항을 "
-        "찾지 못했습니다: "
-        + ", ".join(
-            missing_q14_columns
-        )
+        "원자료에서 다음 Q14 문항을 찾지 못했습니다."
+    )
+
+    st.code(
+        "\n".join(missing_columns),
+        language="text",
+    )
+
+    st.stop()
+
+
+if "ID" not in survey.columns:
+    st.error(
+        "원자료에 ID 열이 없습니다."
+    )
+
+    st.stop()
+
+
+# =========================================================
+# 읍면동 코드 연결
+# =========================================================
+try:
+    survey, code_source = attach_dong_codes(
+        survey
+    )
+
+except Exception as error:
+    st.error(
+        f"읍면동 코드를 결합하지 못했습니다: {error}"
+    )
+
+    st.stop()
+
+
+if survey is None:
+    st.error(
+        "현재 원자료에는 읍면동 코드가 없습니다."
+    )
+
+    st.warning(
+        f"""
+읍면동 지도를 만들려면 `{MAPPING_NAME}` 파일을
+GitHub 저장소에 추가해야 합니다.
+
+이 파일에는 각 응답자의 ID와 실제 10자리 행정동 코드가
+들어 있어야 합니다.
+"""
+    )
+
+    st.code(
+        """ID,코드
+1,1111053000
+2,1111054000
+3,2611051000""",
+        language="text",
+    )
+
+    st.info(
+        "현재 데이터의 DM6는 17개 시도만 구분하므로 "
+        "DM6만으로 읍면동을 알아낼 수 없습니다."
+    )
+
+    st.stop()
+
+
+matched_code_count = (
+    survey["읍면동코드"]
+    .notna()
+    .sum()
+)
+
+if matched_code_count == 0:
+    st.error(
+        "읍면동 코드가 결합된 응답자가 없습니다."
     )
 
     st.stop()
@@ -916,6 +882,10 @@ if missing_q14_columns:
 # =========================================================
 # 사이드바 설정
 # =========================================================
+st.sidebar.header(
+    "지도 설정"
+)
+
 selected_groups = st.sidebar.multiselect(
     "AI 리터러시 영역",
     options=list(
@@ -926,12 +896,9 @@ selected_groups = st.sidebar.multiselect(
     ),
 )
 
-
 if not selected_groups:
-
     st.warning(
-        "AI 리터러시 영역을 "
-        "하나 이상 선택해주세요."
+        "AI 리터러시 영역을 하나 이상 선택해주세요."
     )
 
     st.stop()
@@ -945,7 +912,7 @@ selected_columns = [
 
 
 threshold = st.sidebar.slider(
-    "고리터러시 기준 점수",
+    "높은 AI 리터러시 기준",
     min_value=1.0,
     max_value=5.0,
     value=4.0,
@@ -953,313 +920,206 @@ threshold = st.sidebar.slider(
 )
 
 
-default_minimum_answers = max(
-    1,
-    int(
-        len(selected_columns)
-        * 0.75
+minimum_answers = st.sidebar.slider(
+    "개인별 최소 응답 문항 수",
+    min_value=1,
+    max_value=len(selected_columns),
+    value=max(
+        1,
+        int(
+            len(selected_columns)
+            * 0.75
+        ),
     ),
 )
 
 
-minimum_answer_count = (
-    st.sidebar.slider(
-        "최소 응답 문항 수",
-        min_value=1,
-        max_value=len(
-            selected_columns
-        ),
-        value=default_minimum_answers,
-        help=(
-            "이 개수 이상의 문항에 "
-            "답한 응답자만 평균을 계산합니다."
-        ),
-    )
-)
-
-
-minimum_region_sample = (
-    st.sidebar.number_input(
-        "지도에 표시할 최소 지역 표본 수",
-        min_value=1,
-        max_value=1000,
-        value=10,
-        step=1,
-        help=(
-            "응답자가 너무 적은 지역은 "
-            "색칠하지 않습니다."
-        ),
-    )
+minimum_sample = st.sidebar.number_input(
+    "읍면동 최소 표본 수",
+    min_value=1,
+    max_value=100,
+    value=5,
+    step=1,
+    help=(
+        "이 인원보다 응답자가 적은 읍면동은 "
+        "지도에서 색칠하지 않습니다."
+    ),
 )
 
 
 # =========================================================
-# 지역 코드 및 행정단위 결정
+# 점수 계산
 # =========================================================
-code_column, sigungu_codes = (
-    find_sigungu_code_column(
-        survey
-    )
+literacy_score = calculate_literacy_score(
+    survey,
+    selected_columns,
+    minimum_answers,
 )
 
 
-if code_column is not None:
-
-    region_level = "시군구"
-
-    region_codes = sigungu_codes
-
-    geojson_url = SIGUNGU_URL
-
-    code_note = (
-        f"`{code_column}` 열을 "
-        "5자리 문자열 코드로 변환"
-    )
+weights, weight_note = get_weights(
+    survey
+)
 
 
-elif "DM6" in survey.columns:
-
-    region_level = "시도"
-
-    dm6_values = pd.to_numeric(
-        survey["DM6"],
-        errors="coerce",
-    )
-
-    region_codes = dm6_values.map(
-        DM6_TO_SIDO_CODE
-    )
-
-    geojson_url = SIDO_URL
-
-    code_note = (
-        "`DM6` 값을 2자리 "
-        "시도 코드로 변환"
-    )
+regional_result = aggregate_literacy(
+    survey,
+    literacy_score,
+    weights,
+    threshold,
+)
 
 
-else:
-
+if regional_result.empty:
     st.error(
-        "지역 코드를 찾지 못했습니다. "
-        "시군구 지도에는 5자리 `코드` 열이 "
-        "필요하며, 시도 지도에는 `DM6` 열이 "
-        "필요합니다."
+        "유효한 AI 리터러시 응답과 읍면동 코드가 없습니다."
     )
 
     st.stop()
 
 
 # =========================================================
-# 경계 파일 읽기
+# GeoJSON 결합
 # =========================================================
 try:
+    original_geojson = load_geojson(
+        GEOJSON_URL
+    )
 
-    geojson = load_geojson(
-        geojson_url
+    geojson, boundary_table = prepare_geojson(
+        original_geojson
     )
 
 except Exception as error:
-
     st.error(
-        "경계 GeoJSON을 읽지 못했습니다: "
-        f"{error}"
+        f"전국 행정동 경계 파일을 읽지 못했습니다: {error}"
     )
 
     st.stop()
 
 
-# =========================================================
-# 점수 및 지역별 비율 계산
-# =========================================================
-literacy_scores = (
-    calculate_literacy_scores(
-        survey,
-        selected_columns,
-        minimum_answer_count,
-    )
+map_data = boundary_table.merge(
+    regional_result,
+    on="읍면동코드",
+    how="left",
 )
 
 
-weights, weight_note = (
-    get_weights(
-        survey
-    )
+# 최소 표본보다 적은 지역은 값을 숨깁니다.
+small_sample = (
+    map_data["응답자수"]
+    .fillna(0)
+    < minimum_sample
 )
 
+map_data.loc[
+    small_sample,
+    [
+        "평균 리터러시 점수",
+        "AI 리터러시 비율(%)",
+    ],
+] = float("nan")
 
-regional_result = (
-    aggregate_by_region(
-        region_codes,
-        literacy_scores,
+
+# =========================================================
+# 전국 수치
+# =========================================================
+national_average, national_rate, valid_count = (
+    calculate_national_values(
+        literacy_score,
         weights,
         threshold,
     )
 )
 
 
-if regional_result.empty:
-
-    st.error(
-        "유효한 AI 리터러시 응답과 "
-        "지역 코드가 없어 지도를 "
-        "만들 수 없습니다."
-    )
-
-    st.stop()
-
-
-boundary_data = get_boundary_table(
-    geojson,
-    region_level,
-)
-
-
-map_data = boundary_data.merge(
-    regional_result,
-    on="코드",
-    how="left",
-)
-
-
-# 표본이 적은 지역은 색상에서 제외
-small_sample_mask = (
-    map_data["응답자수"]
-    .fillna(0)
-    < minimum_region_sample
-)
-
-
-map_data.loc[
-    small_sample_mask,
-    [
-        "AI 리터러시 비율(%)",
-        "평균 리터러시 점수",
-    ],
-] = float("nan")
-
-
-# =========================================================
-# 전국 지표 계산
-# =========================================================
-valid_mask = (
-    literacy_scores.notna()
-    & weights.notna()
-    & weights.gt(0)
-)
-
-
-valid_weights = weights.where(
-    valid_mask
-)
-
-
-valid_weight_sum = (
-    valid_weights.sum()
-)
-
-
-if valid_weight_sum > 0:
-
-    national_high_rate = (
-        (
-            literacy_scores
-            .ge(threshold)
-            .astype(float)
-            * valid_weights
-        ).sum()
-        / valid_weight_sum
-        * 100
-    )
-
-    national_average_score = (
-        (
-            literacy_scores
-            * valid_weights
-        ).sum()
-        / valid_weight_sum
-    )
-
-else:
-
-    national_high_rate = (
-        float("nan")
-    )
-
-    national_average_score = (
-        float("nan")
-    )
-
-
-matched_region_count = (
+survey_codes = set(
     regional_result[
-        "코드"
+        "읍면동코드"
     ]
-    .isin(
-        boundary_data["코드"]
-    )
-    .sum()
+)
+
+boundary_codes = set(
+    boundary_table[
+        "읍면동코드"
+    ]
+)
+
+matched_regions = len(
+    survey_codes
+    & boundary_codes
 )
 
 
 # =========================================================
-# 핵심 지표 표시
+# 주요 수치
 # =========================================================
 column1, column2, column3, column4 = (
     st.columns(4)
 )
 
-
 with column1:
-
     st.metric(
-        "유효 응답자",
-        f"{valid_mask.sum():,}명",
+        "전체 원자료",
+        f"{len(survey):,}명",
     )
-
 
 with column2:
-
     st.metric(
-        "전국 고리터러시 비율",
-        f"{national_high_rate:.1f}%",
+        "유효 Q14 응답자",
+        f"{valid_count:,}명",
     )
-
 
 with column3:
-
     st.metric(
         "전국 평균 점수",
-        f"{national_average_score:.2f} / 5",
+        (
+            f"{national_average:.2f} / 5"
+            if pd.notna(national_average)
+            else "계산 불가"
+        ),
     )
 
-
 with column4:
-
     st.metric(
-        "지도 결합 지역",
-        f"{matched_region_count:,}개",
+        "전국 고리터러시 비율",
+        (
+            f"{national_rate:.1f}%"
+            if pd.notna(national_rate)
+            else "계산 불가"
+        ),
     )
 
 
 st.caption(
-    f"원자료: {survey_file_name}"
-    f" · 행정단위: {region_level}"
+    f"원자료: {DATA_NAME}"
+    f" · 지역 코드: {code_source}"
     f" · {weight_note}"
-    f" · {code_note}"
+    f" · 경계와 결합된 읍면동: {matched_regions:,}개"
 )
 
 
 # =========================================================
-# 지도 표시
+# 표본 주의
 # =========================================================
-figure = create_choropleth(
-    map_data=map_data,
-    geojson=geojson,
-    region_level=region_level,
-    threshold=threshold,
+st.warning(
+    """
+이 조사는 전국 읍면동별 통계를 산출하기 위한 전수조사가 아닙니다.
+읍면동별 응답자가 매우 적을 수 있으므로 결과를 지역의 확정적인
+특성으로 해석하면 안 됩니다. 표본 수가 적은 지역은 지도에서
+제외하는 것이 안전합니다.
+"""
 )
 
+
+# =========================================================
+# 지도
+# =========================================================
+figure = create_map(
+    map_data,
+    geojson,
+    threshold,
+)
 
 st.plotly_chart(
     figure,
@@ -1270,61 +1130,38 @@ st.plotly_chart(
 )
 
 
-if region_level == "시도":
-
-    st.warning(
-        "현재 원자료에는 시군구 5자리 코드가 "
-        "없어 코드북의 `DM6`를 이용한 "
-        "시도 단위 지도를 표시했습니다. "
-        "시군구 지도를 만들려면 응답자별 "
-        "5자리 `코드` 열이 필요합니다."
-    )
-
-
 # =========================================================
-# 매칭되지 않은 코드 확인
-# =========================================================
-unmatched_codes = regional_result.loc[
-    ~regional_result["코드"].isin(
-        boundary_data["코드"]
-    ),
-    "코드",
-].tolist()
-
-
-if unmatched_codes:
-
-    with st.expander(
-        "경계 파일과 매칭되지 않은 코드"
-    ):
-
-        st.write(
-            ", ".join(
-                unmatched_codes
-            )
-        )
-
-
-# =========================================================
-# 지역 순위표
+# 순위표
 # =========================================================
 st.subheader(
-    f"{region_level}별 AI 리터러시 순위"
+    "읍면동별 AI 리터러시 현황"
 )
 
-
-ranking = map_data.dropna(
-    subset=[
-        "AI 리터러시 비율(%)",
-    ]
-).copy()
-
-
-ranking = ranking.sort_values(
-    "AI 리터러시 비율(%)",
-    ascending=False,
+ranking = (
+    map_data
+    .dropna(
+        subset=[
+            "AI 리터러시 비율(%)",
+        ]
+    )
+    .sort_values(
+        [
+            "AI 리터러시 비율(%)",
+            "응답자수",
+        ],
+        ascending=[
+            False,
+            False,
+        ],
+    )
+    .copy()
 )
 
+ranking[
+    "평균 리터러시 점수"
+] = ranking[
+    "평균 리터러시 점수"
+].round(2)
 
 ranking[
     "AI 리터러시 비율(%)"
@@ -1333,18 +1170,11 @@ ranking[
 ].round(1)
 
 
-ranking[
-    "평균 리터러시 점수"
-] = ranking[
-    "평균 리터러시 점수"
-].round(2)
-
-
 st.dataframe(
     ranking[
         [
-            "지역명",
-            "코드",
+            "읍면동",
+            "읍면동코드",
             "응답자수",
             "평균 리터러시 점수",
             "AI 리터러시 비율(%)",
@@ -1356,59 +1186,43 @@ st.dataframe(
 
 
 # =========================================================
-# 코드북 문항 확인
-# =========================================================
-with st.expander(
-    "사용한 코드북 Q14 문항"
-):
-
-    q14_table = codebook[
-        codebook["변수"].isin(
-            selected_columns
-        )
-    ][
-        [
-            "변수",
-            "변수설명",
-        ]
-    ].drop_duplicates()
-
-    st.dataframe(
-        q14_table,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-# =========================================================
 # 데이터 점검
 # =========================================================
 with st.expander(
-    "데이터 점검"
+    "데이터 결합 점검"
 ):
-
     st.write(
-        f"원자료 크기: "
-        f"{survey.shape[0]:,}행 × "
-        f"{survey.shape[1]:,}열"
+        f"원자료 행 수: {len(survey):,}명"
     )
 
     st.write(
-        f"사용한 Q14 문항: "
-        f"{len(selected_columns):,}개"
+        f"읍면동 코드가 있는 응답자: "
+        f"{survey['읍면동코드'].notna().sum():,}명"
     )
 
     st.write(
-        f"유효한 지역 코드: "
-        f"{region_codes.notna().sum():,}개"
+        f"유효한 AI 리터러시 응답자: "
+        f"{valid_count:,}명"
     )
 
     st.write(
-        f"유효한 AI 리터러시 응답: "
-        f"{valid_mask.sum():,}개"
+        f"경계 파일과 결합된 읍면동: "
+        f"{matched_regions:,}개"
     )
 
-    st.write(
-        f"경계와 결합된 지역: "
-        f"{matched_region_count:,}개"
+    unmatched_codes = sorted(
+        survey_codes
+        - boundary_codes
     )
+
+    if unmatched_codes:
+        st.warning(
+            "경계 파일과 연결되지 않은 읍면동 코드가 있습니다."
+        )
+
+        st.code(
+            "\n".join(
+                unmatched_codes[:100]
+            ),
+            language="text",
+        )
